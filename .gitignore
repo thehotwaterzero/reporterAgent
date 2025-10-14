@@ -2,6 +2,7 @@ __pycache__/
 node_modules/
 venv/
 .env
+api_keys.env
 dist/
 build/
 *.exe
