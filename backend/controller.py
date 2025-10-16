@@ -13,7 +13,11 @@ class ConversationController:
         """获取指定会话的完整对话历史"""
         full_session_data = chat_service.get_session_with_qas(session_id)
         if not full_session_data or 'chat_qas' not in full_session_data:
-            return ""
+            return "", None
+        
+        # 如果chat_qas列表为空，返回空历史
+        if not full_session_data['chat_qas']:
+            return "", None
 
         history = ""
         for i in range(len(full_session_data['chat_qas'])-1):  
@@ -32,6 +36,16 @@ class ConversationController:
 
     def continue_conversation(self, session_id, user_input):
         history, qa_id = self.get_conversation_history(session_id)
+        
+        # 如果qa_id为None，说明会话不存在或没有问答记录
+        if qa_id is None:
+            yield {
+                'type': 'error',
+                'content': f'会话 {session_id} 不存在或没有问答记录',
+                'data': {}
+            }
+            return
+        
         context = history + f"{user_input}\n"
         response_data = {}
         for chunk in generate_module.generate_response_stream(context, user_input):

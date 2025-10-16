@@ -368,6 +368,16 @@ const startNewDialogue = async (input) => {
             const jsonData = JSON.parse(line.slice(6));
             console.log('StartNewDialogue - 收到数据:', jsonData);
             
+            // 处理错误
+            if (jsonData.type === 'error') {
+              console.error('StartNewDialogue - 收到错误:', jsonData.content);
+              errorMessage.value = jsonData.content || '开始新对话时发生错误';
+              setTimeout(() => {
+                errorMessage.value = '';
+              }, 5000);
+              return; // 退出处理
+            }
+            
             // 处理采访结束标志
             if (jsonData.type === 'is_finished' && (jsonData.data === 1 || jsonData.data === '1' || jsonData.content === '1')) {
               console.log('StartNewDialogue - 收到is_finished信号:', jsonData);
@@ -453,8 +463,16 @@ const startNewDialogue = async (input) => {
             
             // 处理正常的对话开始回复
             if (jsonData.type === 'final' && jsonData.data && !isInterviewFinished) {
-              // 从响应数据中获取session_id，如果没有则使用时间戳
-              sessionId = jsonData.session_id || Date.now();
+              // 从响应数据中获取session_id，尝试多个可能的位置
+              sessionId = jsonData.session_id || jsonData.data.session_id || jsonData.data.id;
+              
+              // 如果没有获取到session_id，记录警告并使用时间戳
+              if (!sessionId) {
+                console.warn('StartNewDialogue - 无法从响应中获取session_id，使用时间戳作为临时ID');
+                sessionId = Date.now();
+              }
+              
+              console.log('StartNewDialogue - 获取到session_id:', sessionId, '来源:', jsonData);
               currentSessionId.value = sessionId;
               
               // 添加用户输入到消息列表
@@ -523,6 +541,16 @@ const startNewDialogue = async (input) => {
               
               history.unshift(newDialogue);
               currentDialogue.value = sessionId;
+              console.log('StartNewDialogue - 新对话创建完成, sessionId:', sessionId, 'currentDialogue:', currentDialogue.value, 'currentSessionId:', currentSessionId.value);
+              
+              // 如果使用的是临时ID（时间戳），需要从后端获取真实的session_id
+              if (!jsonData.session_id && !jsonData.data.session_id && !jsonData.data.id) {
+                console.log('StartNewDialogue - 未获取到后端session_id，将在流结束后重新获取');
+                // 标记需要在流结束后获取真实ID
+                window.__needFetchRealSessionId = true;
+                window.__tempSessionId = sessionId;
+              }
+              
               break;
             }
           } catch (e) {
@@ -539,6 +567,73 @@ const startNewDialogue = async (input) => {
     }, 5000);
   } finally {
     isWaitingForAI.value = false;
+    
+    // 如果标记了需要获取真实session_id，现在获取
+    if (window.__needFetchRealSessionId && window.__tempSessionId) {
+      console.log('StartNewDialogue - 流处理完成，开始获取真实session_id');
+      const tempId = window.__tempSessionId;
+      
+      try {
+        // 短暂延迟，确保后端已保存会话
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // 获取最新的对话列表
+        const response = await fetch(`${API_BASE_URL}/dialogues`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          }
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          const dialogues = Object.values(data);
+          
+          // 找到最新创建的对话（按created_at排序）
+          if (dialogues.length > 0) {
+            const sortedDialogues = dialogues.sort((a, b) => 
+              new Date(b.created_at) - new Date(a.created_at)
+            );
+            const latestDialogue = sortedDialogues[0];
+            const realSessionId = latestDialogue.id;
+            
+            console.log('StartNewDialogue - 获取到真实session_id:', realSessionId, '临时ID:', tempId);
+            
+            // 更新所有相关状态
+            if (messages[tempId]) {
+              messages[realSessionId] = messages[tempId];
+              delete messages[tempId];
+            }
+            
+            // 更新history中的ID
+            const historyItem = history.find(item => item.id === tempId);
+            if (historyItem) {
+              historyItem.id = realSessionId;
+            }
+            
+            // 更新当前会话ID
+            if (currentDialogue.value === tempId) {
+              currentDialogue.value = realSessionId;
+            }
+            if (currentSessionId.value === tempId) {
+              currentSessionId.value = realSessionId;
+            }
+            
+            console.log('StartNewDialogue - session_id更新完成:', {
+              old: tempId,
+              new: realSessionId,
+              currentDialogue: currentDialogue.value,
+              currentSessionId: currentSessionId.value
+            });
+          }
+        }
+      } catch (error) {
+        console.error('StartNewDialogue - 获取真实session_id失败:', error);
+      } finally {
+        delete window.__needFetchRealSessionId;
+        delete window.__tempSessionId;
+      }
+    }
   }
 };
 
@@ -577,6 +672,16 @@ const continueDialogue = async (sessionId, input) => {
           try {
             const jsonData = JSON.parse(line.slice(6));
             console.log('ContinueDialogue - 收到数据:', jsonData);
+            
+            // 处理错误
+            if (jsonData.type === 'error') {
+              console.error('ContinueDialogue - 收到错误:', jsonData.content);
+              errorMessage.value = jsonData.content || '继续对话时发生错误';
+              setTimeout(() => {
+                errorMessage.value = '';
+              }, 5000);
+              return; // 退出处理
+            }
             
             // 处理采访结束标志
             if (jsonData.type === 'is_finished' && (jsonData.data === 1 || jsonData.data === '1' || jsonData.content === '1')) {
@@ -845,11 +950,17 @@ const sendMessage = async () => {
   
   const messageContent = inputText.value.trim();
   
+  console.log('sendMessage - currentSessionId:', currentSessionId.value);
+  console.log('sendMessage - currentDialogue:', currentDialogue.value);
+  console.log('sendMessage - messageContent:', messageContent);
+  
   // 如果是新对话（没有当前会话ID）
   if (!currentSessionId.value) {
+    console.log('sendMessage - 开始新对话');
     // 开始新对话
     await startNewDialogue(messageContent);
   } else {
+    console.log('sendMessage - 继续现有对话, sessionId:', currentSessionId.value);
     // 继续现有对话
     // 先添加用户消息到当前对话
     if (!messages[currentSessionId.value]) {
