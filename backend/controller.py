@@ -4,10 +4,60 @@ import time
 from repository.service import chat_service
 from repository.models import ChatQADubious
 from repository.dao_impl import ChatQADubiousDAO, ChatQADAO, ChatSessionDAO
+from typing import Dict, Any
 
 class ConversationController:
-    # def __init__(self):
-    #     self.dialogues = chat_service.get_all_sessions()
+
+    def get_all_conversations(self) -> Dict[int, Any]:
+        """
+        获取所有会话
+        :return: 包含所有会话的字典，键为会话ID，值为会话详情（包含qas和dubious列表）
+        """
+        sessions = chat_service.get_all_sessions()
+        result = {}
+        
+        for session_id, session in sessions.items():
+            # 直接使用session对象，但需要手动序列化关联数据
+            qas_data = []
+            
+            # 获取该会话的所有QA记录
+            qa_list = chat_service.qa_dao.get_by_session_id(session_id)
+            
+            for qa in qa_list:
+                # 获取该QA的所有dubious记录
+                dubious_list = chat_service.dubious_dao.get_by_qa_id(qa.id)
+                dubious_data = [
+                    {
+                        "id": dubious.id,
+                        "snippet": dubious.snippet
+                    }
+                    for dubious in dubious_list
+                ]
+                
+                qa_item = {
+                    "id": qa.id,
+                    "question": qa.question,
+                    "answer": qa.answer,
+                    "aim": qa.aim,
+                    "emotion": qa.emotion,
+                    "progress": qa.progress,
+                    "created_at": qa.created_at.isoformat() if qa.created_at else None,
+                    "updated_at": qa.updated_at.isoformat() if qa.updated_at else None,
+                    "dubious": dubious_data
+                }
+                qas_data.append(qa_item)
+            
+            result[session_id] = {
+                "id": session.id,
+                "created_at": session.created_at.isoformat() if session.created_at else None,
+                "updated_at": session.updated_at.isoformat() if session.updated_at else None,
+                "is_finished": session.is_finished,
+                "draft": session.draft,
+                "qas": qas_data
+            }
+
+        return result
+
 
     def get_conversation_history(self, session_id):
         """获取指定会话的完整对话历史"""
@@ -34,6 +84,7 @@ class ConversationController:
         
         return history, full_session_data['chat_qas'][-1]['id']
 
+
     def continue_conversation(self, session_id, user_input):
         history, qa_id = self.get_conversation_history(session_id)
         
@@ -54,14 +105,13 @@ class ConversationController:
             yield chunk
 
         # 更新最后一个问答记录
-        qa_dao = ChatQADAO()
-        last_qa_record = qa_dao.get_by_id(qa_id)
+        last_qa_record = chat_service.qa_dao.get_by_id(qa_id)
         if last_qa_record:
             last_qa_record.answer = user_input
             last_qa_record.emotion = response_data.get('emotion', '')
             last_qa_record.progress = response_data.get('process', '')
             # 更新问答记录
-            update_success = qa_dao.update(last_qa_record)
+            update_success = chat_service.qa_dao.update(last_qa_record)
             if update_success:
                 print(f"已更新问答记录 ID: {last_qa_record.id}")
 
@@ -70,12 +120,11 @@ class ConversationController:
                 # print(dubious_list)
                 
                 if dubious_list:
-                    dubious_dao = ChatQADubiousDAO()
                     dubious_records = [
                         ChatQADubious(qa_id=last_qa_record.id, snippet=snippet)
                         for snippet in dubious_list
                     ]
-                    dubious_dao.create_batch(dubious_records)
+                    chat_service.dubious_dao.create_batch(dubious_records)
                     print(f"已保存 {len(dubious_records)} 条可疑语句")
             else:
                 print("更新问答记录失败")
@@ -84,12 +133,11 @@ class ConversationController:
         is_finished = response_data.get('is_finished', 0)
         if is_finished == 1 or is_finished == True:
             # 标记会话为完成
-            session_dao = ChatSessionDAO()
-            session = session_dao.get_by_id(session_id)
+            session = chat_service.session_dao.get_by_id(session_id)
             if session:
                 session.is_finished = True
                 session.draft = response_data.get('draft', '')
-                session_dao.update(session)
+                chat_service.session_dao.update(session)
                 print(f"会话 ID: {session_id} 已标记为完成")
             return
 
@@ -106,6 +154,7 @@ class ConversationController:
             print(f"已创建新问答记录 ID: {next_qa_record.id}")
         else:
             print("创建新问答记录失败")
+
 
     def start_new_conversation(self, initial_input):
         """开始新对话"""
